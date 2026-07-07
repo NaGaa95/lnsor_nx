@@ -1177,7 +1177,7 @@ void glScissorHook(GLint x, GLint y, GLsizei w, GLsizei h) {
   // Match the native-resolution scene viewport remap: a full-target scissor at
   // window*0.75 becomes the full window, so the upscaled scene isn't clipped to
   // the old 540p/810p region. Offset scissors (UI clips) pass through unchanged.
-  if (config.native_res && screen_width > 0 && x == 0 && y == 0 &&
+  if (screen_width > 0 && x == 0 && y == 0 &&
       w == screen_width * 3 / 4 && h == screen_height * 3 / 4) {
     w = screen_width; h = screen_height;
   }
@@ -1683,7 +1683,7 @@ void glViewportHook(GLint x, GLint y, GLsizei width, GLsizei height) {
   // forced from window*0.75 up to the full window size, so the scene viewport the
   // engine sets at window*0.75 must be scaled to match, or it would draw into only
   // the bottom-left of the now-larger target. Recorded into the shadow remapped.
-  if (config.native_res && screen_width > 0 &&
+  if (screen_width > 0 &&
       width == screen_width * 3 / 4 && height == screen_height * 3 / 4) {
     width = screen_width; height = screen_height;
   }

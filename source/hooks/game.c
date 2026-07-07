@@ -66,7 +66,7 @@ uint64_t g_cr_continue; // runtime addr of fnaTexture_CreateRender + 0x10
 extern void *cr_tramp(unsigned w, unsigned h, unsigned c, unsigned d, unsigned t);
 
 static void *my_CreateRender(unsigned w, unsigned h, unsigned c, unsigned d, unsigned t) {
-  if (config.native_res && screen_width > 0 && (int)w == screen_width * 3 / 4 &&
+  if (screen_width > 0 && (int)w == screen_width * 3 / 4 &&
       (int)h == screen_height * 3 / 4) {
     w = (unsigned)screen_width;   // window*0.75 scene target -> full window res
     h = (unsigned)screen_height;
@@ -78,12 +78,8 @@ void patch_game(void) {
   pthr_set_role_symbols(0, 0, 0);
 
   // continuation = runtime (executable) address; hook write = writable mirror.
-  // (Only installed when native-res is on; the detour is a no-op otherwise, but
-  // skipping it entirely keeps native_res=0 a clean "stock engine" fallback.)
-  if (config.native_res) {
-    g_cr_continue = (uint64_t)game_mod.load_virtbase + OFF_CREATERENDER + 0x10;
-    hook_arm64((uintptr_t)game_mod.load_base + OFF_CREATERENDER, (uintptr_t)&my_CreateRender);
-  }
+  g_cr_continue = (uint64_t)game_mod.load_virtbase + OFF_CREATERENDER + 0x10;
+  hook_arm64((uintptr_t)game_mod.load_base + OFF_CREATERENDER, (uintptr_t)&my_CreateRender);
 
   // Loading-screen vtable hook (writes via the writable mirror; reflects at
   // load_virtbase since the whole image is aliased). The slots already hold

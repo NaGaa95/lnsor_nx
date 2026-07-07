@@ -75,8 +75,6 @@ typedef struct {
   int screen_height;
   int language;        // -1 = follow system; else index into the lang table
   int show_fps;        // 1 = small FPS counter in the top-left corner
-  int native_res;      // 1 = render the scene at full window res (default);
-                       // 0 = keep the engine's mobile downscale (fallback)
 } Config;
 
 extern Config config;
