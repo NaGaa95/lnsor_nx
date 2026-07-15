@@ -41,9 +41,6 @@ The port reads `/switch/lnsor_nx/config.txt`, created on first run:
 
 * `screen_width` / `screen_height` — render resolution; `-1` auto-picks
   1280x720 handheld / 1920x1080 docked.
-* `language` — `-1` follows the console language; otherwise an index
-  (`0` en, `1` fr, `2` de, `3` it, `4` es, `5` nl, `6` da, `7` pt-BR, `8` ru,
-  `9` tr, `10` ja, `11` zh, `12` ko).
 * `show_fps` — `1` draws a small FPS counter in the top-left corner.
 
 ### How to build
