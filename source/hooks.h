@@ -7,6 +7,11 @@
 // applies engine-level patches to the loaded libTTapp.so (control mapping)
 void patch_game(void);
 
+// A HintStone module is initialized on an engine worker, but HUDHintStone::Show
+// starts UI animation and immediately polls controls. Service that final call
+// on the GL/render thread.
+void hintstone_service_render_thread(void);
+
 // hooks/egl.c: release the sticky GL-context ownership before a game thread
 // blocks (cond wait / sleep), so parked threads can't starve the renderer
 void egl_gl_ownership_park(void);

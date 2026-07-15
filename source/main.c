@@ -203,6 +203,20 @@ static struct {
   // ShowAlertDialog (e.g. the "no cloud save -> New Game?" prompt).
   void (*setAlertDialogResponse)(void *, void *, int response);
   unsigned char (*backButton)(void *, void *);
+  // Android touch JNI ABI. Integer arguments use the general-purpose register
+  // stream while x/y/pressure use the floating-point stream on AArch64, which
+  // is exactly what these C declarations generate.
+  void (*touchGestureStart)(void *, void *, int pointer, float x, float y,
+                            float pressure);
+  void (*touchGestureEnd)(void *, void *, int pointer, float x, float y,
+                          float pressure);
+  void (*touchDown)(void *, void *, int pointer, float x, float y,
+                    float pressure);
+  void (*touchUp)(void *, void *, int pointer, float x, float y,
+                  float pressure);
+  void (*touchMove)(void *, void *, int pointer, float x, float y,
+                    float pressure);
+  void (*touchCancelAll)(void *, void *);
   // engine native controller ABI (not a JNI entry): set per-frame pad state.
   // signature: (int connected, int buttonMask, float stickX, float stickY)
   void (*controllerSetData)(int, int, float, float);
@@ -232,6 +246,12 @@ static void resolve_fusion_exports(void) {
   RES(updateMovieInfo,      "GameGLSurfaceView_nativeUpdateMovieInfo");
   RES(setAlertDialogResponse, "Fusion_nativeSetAlertDialogResponse");
   RES(backButton,           "Fusion_nativeBackButtonPressed");
+  RES(touchGestureStart,    "Fusion_nativeTouchEventGestureStart");
+  RES(touchGestureEnd,      "Fusion_nativeTouchEventGestureEnd");
+  RES(touchDown,            "Fusion_nativeTouchEventDown");
+  RES(touchUp,              "Fusion_nativeTouchEventUp");
+  RES(touchMove,            "Fusion_nativeTouchEventMove");
+  RES(touchCancelAll,       "Fusion_nativeTouchEventCancelAll");
 
   // The native controller entry the Java GameController would tail-call; we call
   // it directly to push the Switch pad each frame (mangled C++ symbol:
@@ -392,6 +412,11 @@ static void *gl_thread_main(void *arg) {
     // deadlock under the single-GL-context handover.
     update_input();
 
+    // HintStone Module_Init is dispatched by Fusion on a worker, but its Show
+    // method starts UI animation and polls input. Run that final step here,
+    // serialized with update_input and render, to avoid the worker-thread lock.
+    hintstone_service_render_thread();
+
     fz.render(fake_env, fz_class);
     const int now_fbo0 = gl_draw_fbo0_count, now_fbon = gl_draw_fbon_count;
     int present = (now_fbo0 != prev_fbo0 || now_fbon != prev_fbon);
@@ -432,33 +457,160 @@ static void *gl_thread_main(void *arg) {
     egl_gl_service_handover(); // let a waiting loader thread in at the boundary
   }
 
+  if (fz.touchCancelAll)
+    fz.touchCancelAll(fake_env, fz_class);
   fz.pause(fake_env, fz_class);
   egl_gl_ownership_release();
   return NULL;
 }
 
 // ---------------------------------------------------------------------------
-// input pump (render thread): native controller
+// input pump (render thread): native controller + Android-compatible touch
 // ---------------------------------------------------------------------------
 
 static PadState pad;
 
 // Native controller button bits, consumed by fnaController_ProcessJoypadController.
-// Recovered by disassembling that function; 0x800 is a select/back input this game
-// tests that Batman 3 did not, bound to Minus.
+// Recovered by disassembling that function. UI modules do not consistently turn
+// the analog stick into d-pad input, so the four digital bits must be sent too.
 enum {
+  PAD_DLEFT  = 0x001,  // engine slot 14 d-pad left
+  PAD_DRIGHT = 0x002,  // engine slot 15 d-pad right
+  PAD_DUP    = 0x004,  // engine slot 12 d-pad up
+  PAD_DDOWN  = 0x008,  // engine slot 13 d-pad down
   PAD_A      = 0x020,  // engine slot 17 "A"  (action / use / UI-cancel)
   PAD_B      = 0x010,  // engine slot 18 "B"  (jump / UI-confirm)
   PAD_X      = 0x080,  // engine slot 16 "X"  (attack / modifier)
   PAD_Y      = 0x040,  // engine slot 19 "Y"  (special / grapple)
+  PAD_SELECT = 0x200,  // engine select/back input -> Minus
   PAD_L      = 0x400,  // engine slot 8  "L"  shoulder
-  PAD_R      = 0x004,  // engine slot 10 "R"  shoulder
-  PAD_SELECT = 0x800,  // engine slot 9  select/back (Shadow of Ronin extra) -> Minus
+  PAD_R      = 0x800,  // engine slot 10 "R"  shoulder
   PAD_START  = 0x100,  // engine slot 6  START / pause
-  PAD_DUP    = 0x008,  // engine slot 12 d-pad up    (recovered; folded to stick below)
-  PAD_DDOWN  = 0x001,  // engine slot 13 d-pad down
-  PAD_DLEFT  = 0x002,  // engine slot 14 d-pad left
 };
+
+// Fusion's processed touch buffer has eleven entries. Its native SetData uses
+// pointer as an unchecked array index, so never pass hid's finger_id directly:
+// map each live Switch finger to one of these safe, stable Fusion pointer IDs.
+#define MAX_FUSION_TOUCHES 11
+typedef struct {
+  int active;
+  int seen;
+  u32 switch_id;
+  float x, y;
+} TrackedTouch;
+
+static TrackedTouch tracked_touches[MAX_FUSION_TOUCHES];
+static int tracked_touch_count = 0;
+
+static int find_touch(u32 switch_id) {
+  for (int i = 0; i < MAX_FUSION_TOUCHES; i++)
+    if (tracked_touches[i].active && tracked_touches[i].switch_id == switch_id)
+      return i;
+  return -1;
+}
+
+static int alloc_touch(void) {
+  for (int i = 0; i < MAX_FUSION_TOUCHES; i++)
+    if (!tracked_touches[i].active)
+      return i;
+  return -1;
+}
+
+static void touch_position(const HidTouchState *touch, float *x, float *y) {
+  // hid touch coordinates are always in the Switch panel's 1280x720 space;
+  // Fusion expects coordinates in the surface passed to nativeResize.
+  *x = (float)touch->x * (float)screen_width / 1280.0f;
+  *y = (float)touch->y * (float)screen_height / 720.0f;
+}
+
+static void clear_tracked_touches(void) {
+  memset(tracked_touches, 0, sizeof(tracked_touches));
+  tracked_touch_count = 0;
+}
+
+static void feed_touchscreen(void) {
+  if (!fz.touchGestureStart || !fz.touchGestureEnd || !fz.touchDown ||
+      !fz.touchUp || !fz.touchMove)
+    return;
+
+  HidTouchScreenState state = {0};
+  const size_t samples = hidGetTouchScreenStates(&state, 1);
+  int count = samples ? state.count : 0;
+  if (count < 0) count = 0;
+  if (count > 16) count = 16;
+
+  for (int i = 0; i < MAX_FUSION_TOUCHES; i++)
+    tracked_touches[i].seen = 0;
+
+  for (int i = 0; i < count; i++) {
+    const HidTouchState *touch = &state.touches[i];
+    int slot = find_touch(touch->finger_id);
+    float x, y;
+    touch_position(touch, &x, &y);
+
+    // libnx includes the final coordinates in an End sample. Preserve those,
+    // but leave the slot unseen so the release pass below emits Up/GestureEnd.
+    if (touch->attributes & HidTouchAttribute_End) {
+      if (slot >= 0) {
+        tracked_touches[slot].x = x;
+        tracked_touches[slot].y = y;
+      }
+      continue;
+    }
+
+    if (slot < 0) {
+      slot = alloc_touch();
+      if (slot < 0)
+        continue; // safe cap: Fusion cannot represent more simultaneous points
+
+      TrackedTouch *tracked = &tracked_touches[slot];
+      tracked->active = 1;
+      tracked->seen = 1;
+      tracked->switch_id = touch->finger_id;
+      tracked->x = x;
+      tracked->y = y;
+
+      if (tracked_touch_count++ == 0) {
+        fz.touchGestureStart(fake_env, fz_class, slot, x, y, 1.0f);
+      } else {
+        fz.touchDown(fake_env, fz_class, slot, x, y, 1.0f);
+      }
+    } else {
+      TrackedTouch *tracked = &tracked_touches[slot];
+      tracked->seen = 1;
+      tracked->x = x;
+      tracked->y = y;
+      fz.touchMove(fake_env, fz_class, slot, x, y, 1.0f);
+    }
+  }
+
+  int remaining = 0;
+  for (int i = 0; i < MAX_FUSION_TOUCHES; i++)
+    if (tracked_touches[i].active && tracked_touches[i].seen)
+      remaining++;
+
+  if (tracked_touch_count > 0 && remaining == 0) {
+    // Android closes the final pointer with GestureEnd, which releases every
+    // native touch and prevents a stale held point from owning later modal UI.
+    for (int i = 0; i < MAX_FUSION_TOUCHES; i++) {
+      if (tracked_touches[i].active) {
+        fz.touchGestureEnd(fake_env, fz_class, i, tracked_touches[i].x,
+                           tracked_touches[i].y, 1.0f);
+        break;
+      }
+    }
+    clear_tracked_touches();
+  } else {
+    for (int i = 0; i < MAX_FUSION_TOUCHES; i++) {
+      TrackedTouch *tracked = &tracked_touches[i];
+      if (tracked->active && !tracked->seen) {
+        fz.touchUp(fake_env, fz_class, i, tracked->x, tracked->y, 1.0f);
+        memset(tracked, 0, sizeof(*tracked));
+        tracked_touch_count--;
+      }
+    }
+  }
+}
 
 // circle->square stick remap so diagonals reach full deflection
 static void stick_c2s(float *x, float *y) {
@@ -472,8 +624,8 @@ static void stick_c2s(float *x, float *y) {
 }
 
 // Push the Switch pad into the engine via the native controller ABI. The d-pad
-// is folded into the left stick (LEGO movement is analog); face/shoulder/
-// start/select map to the button mask above.
+// reinforces the left stick for movement and is also sent through the native
+// digital slots used directly by modal UI modules.
 static void feed_controller(void) {
   if (!fz.controllerSetData)
     return;
@@ -497,6 +649,10 @@ static void feed_controller(void) {
   if (down & (HidNpadButton_R | HidNpadButton_ZR)) mask |= PAD_R;
   if (down & HidNpadButton_Plus) mask |= PAD_START;
   if (down & HidNpadButton_Minus) mask |= PAD_SELECT;
+  if (down & HidNpadButton_Left) mask |= PAD_DLEFT;
+  if (down & HidNpadButton_Right) mask |= PAD_DRIGHT;
+  if (down & HidNpadButton_Up) mask |= PAD_DUP;
+  if (down & HidNpadButton_Down) mask |= PAD_DDOWN;
 
   // SetData negates the incoming Y before storing (Android Y is +down), so pass
   // -ly to land the engine's stick at +up == Switch stick up.
@@ -505,6 +661,7 @@ static void feed_controller(void) {
 
 static void update_input(void) {
   padUpdate(&pad);
+  feed_touchscreen();
   feed_controller();
 }
 
@@ -575,6 +732,7 @@ int main(int argc, char **argv) {
   // inside its frame loop, so `pad` must be ready before gl_thread_ready is reached.
   padConfigureInput(8, HidNpadStyleSet_NpadStandard);
   padInitializeAny(&pad);
+  hidInitializeTouchScreen();
 
   // spawn the GL thread (real pthread so its identity matches the egl ownership
   // machine's pthread_self bookkeeping) and wait for engine bring-up

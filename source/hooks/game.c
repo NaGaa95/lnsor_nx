@@ -5,7 +5,7 @@
  * need no engine-internal hooks: input uses the native controller ABI (from
  * main.c) and cutscenes flow through the JNI startMoviePlayback path.
  *
- * The two offsets below are from libLEGO_Pixel_Mobile.so's exported symbols
+ * The loading-screen and rendering offsets are from exported symbols in
  * (_ZTV23UI_LoadingScreen_Module, _Z23fnaTexture_CreateRenderjjjjjPKc); the
  * vtable slot layout and CreateRender prologue match Batman 3, so cr_tramp.s and
  * the slot math are reused unchanged.
@@ -50,6 +50,35 @@ static void *my_ls_exit(void *self) {
   return s_ls_exit_orig(self);
 }
 
+// --- HintStone UI -----------------------------------------------------------
+// Module_Init runs on a Fusion worker. Its final HUDHintStone::Show call starts
+// an animation and immediately polls controls, both owned by the render path.
+// Running that call on the worker can deadlock after touch input, so the hook
+// performs the first two original calls there and defers only Show to the GL
+// thread. The original body is:
+//   Hud_ShowHudItems(false); HUDHintStone::Init(); HUDHintStone::Show();
+#define OFF_HINTSTONE_VTABLE 0x5eb5c8
+
+typedef void (*hud_show_items_fn)(int show);
+typedef void (*hud_hint_fn)(void);
+
+static hud_show_items_fn s_hud_show_items;
+static hud_hint_fn s_hud_hint_init;
+static hud_hint_fn s_hud_hint_show;
+static volatile int s_hint_show_pending;
+
+static void my_hint_init(void *self) {
+  (void)self;
+  s_hud_show_items(0);
+  s_hud_hint_init();
+  __atomic_store_n(&s_hint_show_pending, 1, __ATOMIC_RELEASE);
+}
+
+void hintstone_service_render_thread(void) {
+  if (__atomic_exchange_n(&s_hint_show_pending, 0, __ATOMIC_ACQ_REL))
+    s_hud_hint_show();
+}
+
 // --- native-resolution rendering -------------------------------------------
 // The engine sizes its scene render targets to window*0.75 (a hardcoded mobile
 // downscale: 1280x720->960x540, 1920x1080->1440x810) via fnaTexture_CreateRender
@@ -89,4 +118,18 @@ void patch_game(void) {
   s_ls_exit_orig   = *(ls_voidfn *)(vt + 0x40);
   *(void **)(vt + 0x30) = (void *)&my_ls_update;
   *(void **)(vt + 0x40) = (void *)&my_ls_exit;
+
+  s_hud_show_items = (hud_show_items_fn)so_try_find_addr_rx(
+      &game_mod, "_Z16Hud_ShowHudItemsb");
+  s_hud_hint_init = (hud_hint_fn)so_try_find_addr_rx(
+      &game_mod, "_ZN12HUDHintStone4InitEv");
+  s_hud_hint_show = (hud_hint_fn)so_try_find_addr_rx(
+      &game_mod, "_ZN12HUDHintStone4ShowEv");
+
+  // Only replace Module_Init when every function needed to reproduce its body
+  // was resolved. Otherwise the original game implementation remains intact.
+  if (s_hud_show_items && s_hud_hint_init && s_hud_hint_show) {
+    uintptr_t hvt = (uintptr_t)game_mod.load_base + OFF_HINTSTONE_VTABLE;
+    *(void **)(hvt + 0x30) = (void *)&my_hint_init;
+  }
 }
