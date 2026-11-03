@@ -759,7 +759,6 @@ EGLBoolean eglQuerySurfaceHook(EGLDisplay dpy, EGLSurface surface, EGLint attrib
   return r;
 }
 
-#include "../fps.h"
 
 // Count near-black samples in a 5x5 grid (0.1..0.9) over the window backbuffer.
 // The render loop uses this to drop the loading screen's black frames while the
@@ -789,8 +788,6 @@ EGLBoolean eglSwapBuffersHook(EGLDisplay dpy, EGLSurface surface) {
   if (!begin_gl_call("eglSwapBuffers"))
     return EGL_FALSE;
 
-  if (config.show_fps)
-    fps_render();
 
   EGLBoolean r = eglSwapBuffers(dpy, surface);
   // end_gl_call hands the context to a waiter if one asked; when uncontended the

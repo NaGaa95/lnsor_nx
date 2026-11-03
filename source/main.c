@@ -13,6 +13,7 @@
  * of the MIT license.  See the LICENSE file for details.
  */
 
+#include "saltynx.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -666,6 +667,8 @@ static void update_input(void) {
 }
 
 int main(int argc, char **argv) {
+  saltynx_start();
+  atexit(saltynx_stop);
   pthr_pin_worker_core();
   cpu_boost(1);
 
