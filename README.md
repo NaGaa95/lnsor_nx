@@ -70,8 +70,3 @@ This project has no affiliation with TT Games, Warner Bros., or the LEGO Group.
 "LEGO Ninjago: Shadow of Ronin" and related marks belong to their respective
 owners. No assets or program code from the original game or its Android port are
 included here. We do not condone piracy; users must own a legal copy of the game.
-
-### SaltyNX telemetry
-
-FPS and render resolution are published to SaltyNX shared memory for compatible overlays. The port continues normally when SaltyNX is not running. This reports presentation timing and resolution; it does not change the game's frame cap.
-The old wrapper FPS overlay and its `show_fps` setting have been removed. Existing config entries are ignored; use a SaltyNX-compatible overlay to view FPS.
