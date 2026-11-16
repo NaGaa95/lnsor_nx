@@ -135,6 +135,7 @@ static __thread EGLContext tls_bound_ctx = EGL_NO_CONTEXT;
 static __thread EGLSurface tls_bound_draw = EGL_NO_SURFACE;
 static __thread FakePbuffer *tls_bound_fake = NULL;
 static __thread GLuint tls_bound_vfbo = 0;
+static __thread int tls_bound_fbo_valid = 0;
 static __thread CtxOwner *tls_bound_rec = NULL;
 static __thread GLuint tls_real_bound_fbo = 0; // which real FBO the window ctx targets
 
@@ -361,6 +362,8 @@ static void bind_virtual_framebuffer_for_context(void) {
   if (current_fake_draw && current_virtual_fbo == 0)
     actual = current_fake_pbuffer_fbo();
   glBindFramebuffer(GL_FRAMEBUFFER, actual);
+  if (!current_fake_draw)
+    tls_real_bound_fbo = actual;
 }
 
 // drop the really-bound context. No explicit glFlush: eglMakeCurrent flushes
@@ -389,6 +392,7 @@ static void release_gl_ownership(void) {
   tls_bound_draw = EGL_NO_SURFACE;
   tls_bound_fake = NULL;
   tls_bound_vfbo = 0;
+  tls_bound_fbo_valid = 0;
   tls_bound_rec = NULL;
 }
 
@@ -450,6 +454,7 @@ static EGLBoolean begin_gl_call(const char *why) {
 
   // fast path: this thread really has the right context+state bound
   if (tls_bound_ctx == want && tls_bound_draw == draw &&
+      tls_bound_fbo_valid &&
       tls_bound_fake == current_fake_draw && tls_bound_vfbo == current_virtual_fbo) {
     // same thread may have switched LOGICAL contexts since the last call
     apply_logical_state_if_changed();
@@ -522,16 +527,19 @@ static EGLBoolean begin_gl_call(const char *why) {
     tls_bound_draw = draw;
     tls_bound_fake = NULL;
     tls_bound_vfbo = 0;
+    tls_bound_fbo_valid = 0;
   }
 
   // the real context may still carry another logical context's bindings
   apply_logical_state_if_changed();
 
-  // restore this thread's virtual framebuffer binding if it changed
-  if (tls_bound_fake != current_fake_draw || tls_bound_vfbo != current_virtual_fbo) {
+  // A freshly rebound shared context can still hold another thread's FBO.
+  if (!tls_bound_fbo_valid || tls_bound_fake != current_fake_draw ||
+      tls_bound_vfbo != current_virtual_fbo) {
     bind_virtual_framebuffer_for_context();
     tls_bound_fake = current_fake_draw;
     tls_bound_vfbo = current_virtual_fbo;
+    tls_bound_fbo_valid = 1;
   }
   return EGL_TRUE;
 }
@@ -816,6 +824,7 @@ void glBindFramebufferHook(GLenum target, GLuint framebuffer) {
     // path doesn't think the framebuffer needs rebinding
     tls_bound_vfbo = framebuffer;
     tls_bound_fake = current_fake_draw;
+    tls_bound_fbo_valid = 1;
   }
   end_gl_call();
 }
@@ -1549,11 +1558,11 @@ void glClearColorHook(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
 void glDrawElementsHook(GLenum mode, GLsizei count, GLenum type, const void *indices) {
   if (skip_fake_pbuffer_default_draw())
     return;
+  if (!begin_gl_call("glDrawElements"))
+    return;
   if (!current_fake_draw) {
     if (tls_real_bound_fbo == 0) ++gl_draw_fbo0_count; else ++gl_draw_fbon_count;
   }
-  if (!begin_gl_call("glDrawElements"))
-    return;
   glDrawElements(mode, count, type, indices);
   end_gl_call();
 }
@@ -1561,11 +1570,11 @@ void glDrawElementsHook(GLenum mode, GLsizei count, GLenum type, const void *ind
 void glDrawArraysHook(GLenum mode, GLint first, GLsizei count) {
   if (skip_fake_pbuffer_default_draw())
     return;
+  if (!begin_gl_call("glDrawArrays"))
+    return;
   if (!current_fake_draw) {
     if (tls_real_bound_fbo == 0) ++gl_draw_fbo0_count; else ++gl_draw_fbon_count;
   }
-  if (!begin_gl_call("glDrawArrays"))
-    return;
   glDrawArrays(mode, first, count);
   end_gl_call();
 }
