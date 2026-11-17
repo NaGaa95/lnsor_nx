@@ -21,6 +21,7 @@
 #include "../hooks.h"
 #include "../pthr.h"
 #include "../config.h" // screen_width / screen_height
+#include "../audio.h"
 
 extern so_module game_mod; // defined in main.c
 
@@ -132,4 +133,9 @@ void patch_game(void) {
     uintptr_t hvt = (uintptr_t)game_mod.load_base + OFF_HINTSTONE_VTABLE;
     *(void **)(hvt + 0x30) = (void *)&my_hint_init;
   }
+
+  // Install geMusic/geSound_SetGlobalVolume hooks to capture the user's true
+  // volume intent. These are called from patch_game (before so_finalize) so the
+  // writable mirror is still active.
+  patch_audio();
 }

@@ -19,6 +19,7 @@
 #include "sles_allinclusive.h"
 #include <math.h>
 #include <stdint.h>
+#include "audio.h"
 
 #ifdef __SWITCH__
 #include "pthr.h"
@@ -215,6 +216,11 @@ static SLboolean track_check(Track *track, PendingPlayCallback *pending,
         switch (audioPlayer->mPlay.mState) {
 
         case SL_PLAYSTATE_PLAYING:  // continue playing current track data
+            // Apply global slider changes even while the current buffer is playing.
+            audioPlayerGainUpdate(audioPlayer);
+            track->mGains[0] = audioPlayer->mGains[0];
+            track->mGains[1] = audioPlayer->mGains[1];
+
             if (0 < track->mAvail) {
                 trackHasData = SL_BOOLEAN_TRUE;
                 break;
@@ -244,10 +250,6 @@ static SLboolean track_check(Track *track, PendingPlayCallback *pending,
 				audioPlayer->mPlay.mState = SL_PLAYSTATE_STOPPING;
 #endif
             }
-
-            // copy gains from audio player to track
-            track->mGains[0] = audioPlayer->mGains[0];
-            track->mGains[1] = audioPlayer->mGains[1];
             break;
 
         case SL_PLAYSTATE_STOPPING: // application thread(s) called Play::SetPlayState(STOPPED)
@@ -297,11 +299,6 @@ broadcast:
 
 }
 
-
-// Minimum linear gain applied to any SFX voice that has PCM data to mix, to keep
-// engine-over-attenuated effects audible. Tunable: raise if SFX still too quiet,
-// lower if distant sounds are too loud / the mix is cluttered.
-#define SFX_GAIN_FLOOR 0.2f
 
 /** \brief This is the track mixer: fill the specified 16-bit stereo PCM buffer */
 
@@ -353,26 +350,6 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
         }
 
         // track is playing
-
-        // SFX gain floor: the engine attenuates many positional SFX to near 0, so
-        // rescue any voice that has data. Scale both channels so the LOUDER one
-        // reaches the floor (preserves the L/R pan; per-channel clamping would
-        // collapse it to centre). Music's 0.35 floor (set in audioPlayerGainUpdate)
-        // is already above SFX_GAIN_FLOOR, so music is untouched. (Matches LSWTFA.)
-        {
-            float g0 = track->mGains[0], g1 = track->mGains[1];
-            float gmax = g0 > g1 ? g0 : g1;
-            if (gmax < SFX_GAIN_FLOOR) {
-                if (gmax > 1.0e-4f) {           // keep the pan ratio
-                    float s = SFX_GAIN_FLOOR / gmax;
-                    track->mGains[0] = g0 * s;
-                    track->mGains[1] = g1 * s;
-                } else {                        // fully silenced -> rescue centred
-                    track->mGains[0] = SFX_GAIN_FLOOR;
-                    track->mGains[1] = SFX_GAIN_FLOOR;
-                }
-            }
-        }
 
         int32_t *mixWriter = mixAccum;
         unsigned desired = size;
@@ -581,7 +558,19 @@ SLresult IOutputMixExt_checkAudioPlayerSourceSink(CAudioPlayer *this)
 }
 
 
-/** \brief Called when a gain-related field (mute, solo, volume, stereo position, etc.) updated */
+/** \brief Called when a gain-related field (mute, solo, volume, stereo position, etc.) updated
+ *
+ * Gain model
+ * ----------
+ * ANDROIDFD (music) players use the captured global music gain, except that
+ * SL_MILLIBEL_MIN still explicitly silences an individual player.
+ *
+ * BUFFERQUEUE / ANDROIDSIMPLEBUFFERQUEUE players use mLevel directly: the
+ * engine already combines its master sound volume with per-player attenuation.
+ * The captured sound gain also silences immediately when the slider reaches zero.
+ *
+ * When a hook is inactive, use powf(10, mLevel/2000) for that player type.
+ */
 
 void audioPlayerGainUpdate(CAudioPlayer *audioPlayer)
 {
@@ -595,11 +584,25 @@ void audioPlayerGainUpdate(CAudioPlayer *audioPlayer)
     if (soloMask) {
         muteMask |= ~soloMask;
     }
-    if (mute || !(~muteMask & 3)) {
+
+    int isMusic = (audioPlayer->mDataSource.mLocator.mLocatorType
+                   == SL_DATALOCATOR_ANDROIDFD);
+
+    float playerGain;
+    if (mute || !(~muteMask & 3) || level == SL_MILLIBEL_MIN) {
+        playerGain = 0.0f;
+    } else if (isMusic && g_musicHookActive) {
+        playerGain = g_globalMusicGain;
+    } else if (!isMusic && g_soundHookActive && g_globalSoundGain <= 0.0f) {
+        playerGain = 0.0f;
+    } else {
+        playerGain = powf(10.0f, (float)level / 2000.0f);
+    }
+
+    if (playerGain <= 0.0f) {
         audioPlayer->mGains[0] = 0.0f;
         audioPlayer->mGains[1] = 0.0f;
     } else {
-        float playerGain = powf(10.0f, level / 2000.0f);
         unsigned channel;
         for (channel = 0; channel < STEREO_CHANNELS; ++channel) {
             float gain;
@@ -626,21 +629,6 @@ void audioPlayerGainUpdate(CAudioPlayer *audioPlayer)
                 }
             }
             audioPlayer->mGains[channel] = gain;
-        }
-    }
-
-    // Streamed music (ANDROIDFD) is 2D but the engine runs it through the same
-    // 3D-attenuation pipeline, fading it to silence as the camera moves. Floor its
-    // gain so it stays audible -- but NOT when the engine explicitly wants it off
-    // (level at SL_MILLIBEL_MIN, or a hard mute), so a track it stops actually goes
-    // silent. (Matches LSWTFA.)
-    {
-        int isMusic = (audioPlayer->mDataSource.mLocator.mLocatorType == SL_DATALOCATOR_ANDROIDFD);
-        int isMuted = (mute || !(~muteMask & 3));
-        if (isMusic && !isMuted && level > SL_MILLIBEL_MIN) {
-            const float kMusicFloor = 0.35f;
-            if (audioPlayer->mGains[0] < kMusicFloor) audioPlayer->mGains[0] = kMusicFloor;
-            if (audioPlayer->mGains[1] < kMusicFloor) audioPlayer->mGains[1] = kMusicFloor;
         }
     }
 }
