@@ -15,14 +15,46 @@
  */
 
 #include <stdint.h>
+#include <string.h>
 #include <switch.h> // armGetSystemTick
 
 #include "../so_util.h"
 #include "../hooks.h"
 #include "../pthr.h"
 #include "../config.h" // screen_width / screen_height
+#include "../error.h"
 
 extern so_module game_mod; // defined in main.c
+
+// Swap X/Y icons and prompt animations in the loaded game image.
+static void patch_button_icons(void) {
+  static const struct {
+    size_t offset;
+    const char *original;
+    const char *replacement;
+  } icons[] = {
+    { 0x52544f, "sprites/Buttons/Button_MOGA_X.tga", "sprites/Buttons/Button_MOGA_Y.tga" },
+    { 0x525471, "sprites/Buttons/Button_MOGA_Y.tga", "sprites/Buttons/Button_MOGA_X.tga" },
+    { 0x52b500, "Sprites/buttons/Button_MOGA_Y.tga", "Sprites/buttons/Button_MOGA_X.tga" },
+    { 0x540f3b, "Button_Moga_Y_Press", "Button_Moga_X_Press" },
+    { 0x540f4f, "Button_Moga_Y_Bash",  "Button_Moga_X_Bash" },
+    { 0x540f62, "Button_Moga_Y_Hold",  "Button_Moga_X_Hold" },
+    { 0x540fe9, "Button_Moga_X_Press", "Button_Moga_Y_Press" },
+    { 0x540ffd, "Button_Moga_X_Bash",  "Button_Moga_Y_Bash" },
+    { 0x541010, "Button_Moga_X_Hold",  "Button_Moga_Y_Hold" },
+  };
+  for (size_t i = 0; i < sizeof(icons) / sizeof(icons[0]); i++) {
+    size_t len = strlen(icons[i].original) + 1;
+    if (strlen(icons[i].replacement) + 1 != len ||
+        icons[i].offset > game_mod.load_size ||
+        len > game_mod.load_size - icons[i].offset ||
+        memcmp((char *)game_mod.load_base + icons[i].offset, icons[i].original, len) != 0)
+      fatal_error("Unsupported game binary.");
+  }
+  for (size_t i = 0; i < sizeof(icons) / sizeof(icons[0]); i++)
+    memcpy((char *)game_mod.load_base + icons[i].offset, icons[i].replacement,
+           strlen(icons[i].replacement) + 1);
+}
 
 // --- loading-screen detection ----------------------------------------------
 // The CPU boost (ApmCpuBoostMode_FastLoad downclocks the GPU) must run on loading
@@ -106,6 +138,8 @@ static void *my_CreateRender(unsigned w, unsigned h, unsigned c, unsigned d, uns
 void patch_game(void) {
   pthr_set_role_symbols(0, 0, 0);
 
+  patch_button_icons();
+
   // continuation = runtime (executable) address; hook write = writable mirror.
   g_cr_continue = (uint64_t)game_mod.load_virtbase + OFF_CREATERENDER + 0x10;
   hook_arm64((uintptr_t)game_mod.load_base + OFF_CREATERENDER, (uintptr_t)&my_CreateRender);
@@ -132,4 +166,5 @@ void patch_game(void) {
     uintptr_t hvt = (uintptr_t)game_mod.load_base + OFF_HINTSTONE_VTABLE;
     *(void **)(hvt + 0x30) = (void *)&my_hint_init;
   }
+
 }
